@@ -1,0 +1,42 @@
+name: Run performance tests
+
+on:
+  #schedule:
+  #  - cron: '13 6 * * *'
+  workflow_dispatch:
+
+jobs:
+
+  Run_performance_tests:
+    name: Run performance tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+
+    steps:
+
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+
+      - name: Run performance tests
+
+        env:
+          PYMUPDF_PERFORMANCE_RESULTS_RW: ${{ secrets.PYMUPDF_PERFORMANCE_RESULTS_RW }}
+
+        shell: python
+
+        run: |
+            import os
+            import sys
+            import subprocess
+            
+            def log(text):
+                print(text)
+                sys.stdout.flush()
+
+            def run(command):
+                log(f'Running: {command}')
+                subprocess.run(command, shell=1, check=1)
+
+            run(f'{sys.executable} main.py')

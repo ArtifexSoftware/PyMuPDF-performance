@@ -87,7 +87,7 @@ import time
 import github
 
 
-def performance(tests=None, paths=None, tools=None, timeout=None, internal_check=None):
+def performance(tests=None, paths=None, tools=None, timeout=None, internal_check=None, pymupdfs=None):
     '''
     Runs performance tests and saves to JSON results file whose name contains
     current date/time.
@@ -101,7 +101,15 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
         internal_check:
             If true we don't actually run tests but instead pretend that all
             timings are 1.
+
+    pymupdfs:
+        Dict mapping PyMuPDF build identifiers such as 'mupdf-master', to
+        directory containing installation's `fitz/` directory.
     '''
+    log(f'PyMuPDF variants are:')
+    for n, v in pymupdfs.items():
+        log(f'    {n}: {v}')
+
     # Input files.
     #
     if paths:
@@ -124,13 +132,26 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     #
     testnames = set(tests) if tests else set()
     toolnames = set(tools) if tools else set()
+
+    # Define functions that call pymupdf variants.
+    #
+    new_globals = dict()
+    _make_pymupdf_version_variants(pymupdfs, new_globals)
     for fnname, fn in globals().items():
-        match = re.match(f'^do_([a-z]+)_([a-z0-9]+)$', fnname)
+        match = re.match(f'^do_([a-z]+)_([a-z0-9_]+)$', fnname)
         if match:
+            testname = match.group(1)
+            toolname = match.group(2)
             if not tests:
-                testnames.add(match.group(1))
-            if not tools:
-                toolnames.add(match.group(2))
+                testnames.add(testname)
+            if toolname == 'pymupdf':
+                _make_pymupdf_variants(fnname, fn, pymupdfs, new_globals, None if tools else toolnames)
+            elif not tools:
+                toolnames.add(toolname)
+
+    for n, v in new_globals.items():
+        #log(f'Setting globals({n}) to {v}')
+        globals()[n] = v
 
     # Set up results dict.
     #
@@ -145,7 +166,20 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
         toolversions_fn = globals().get(name)
         if not toolversions_fn:
             raise Exception(f'Need function {name}() to find version of {toolname=}.')
-        results['toolversions'][toolname] = toolversions_fn()
+        if toolname.startswith('pymupdf'):
+            # We must not import this pymupdf because it will make it
+            # impossible to import a different pymupdf variant later on. So we
+            # use `multiprocessing`, receiving the version via a queue.
+            #
+            queue = multiprocessing.Queue()
+            p = multiprocessing.Process(target=toolversions_fn, args=(queue,))
+            p.start()
+            version = queue.get()
+            p.join()
+            log('Have called pymupdf version fn. {version=}')
+        else:
+            version = toolversions_fn()
+        results['toolversions'][toolname] = version
 
     log(f'testnames:\n{json.dumps(list(testnames), indent="    ", sort_keys=1)}')
     log(f'toolnames:\n{json.dumps(list(toolnames), indent="    ", sort_keys=1)}')
@@ -154,7 +188,7 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
 
     def all_tests():
         '''
-        Yields (testname, path, toolname, fn) for each test to run.
+        Yields `(testname, path, toolname, fn)` for each test to run.
         '''
         for testname in sorted(testnames):
             for path in pathnames:
@@ -213,10 +247,7 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     #
     with open(name, 'w') as f:
         json.dump(results, f, indent='    ', sort_keys=1)
-    log(f'Have written results to: {path}')
-
-    # Create symlink to latest result.
-    #
+    log(f'Have written results to: {name}')
     try:
         os.remove(name_latest)
     except Exception:
@@ -225,45 +256,89 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     log(f'Have created symlink: {name_latest} -> {name}')
 
 
-def time_it(fn, mp_timeout):
+def time_it(fn, timeout):
     '''
-    Runs `fn()`.
+    Runs `fn()` in a separate process using Python's `multiprocessing`
+    module.
     
-    If `mp_timeout` is true it should be timeout in seconds and we run `fn()`
-    in a `multiprocessing.Process()` with specified timeout.
-
     Returns (t, e). `t` is the time in seconds to run fn(). `e` is 0 on
     success, None if timeout, non-zero error code or string exception text.
     '''
-    if mp_timeout:
-        p = multiprocessing.Process(target=fn)
-        t0 = time.perf_counter()
-        p.start()
-        p.join(mp_timeout)
+    p = multiprocessing.Process(target=fn)
+    t0 = time.perf_counter()
+    p.start()
+    p.join(timeout)
+    if p.exitcode is None:
+        # Timeout.
+        log(f'Multiprocessing timeout.')
+        e = None
+        p.terminate()
+        p.join(10)
         if p.exitcode is None:
-            # Timeout.
-            log(f'Multiprocessing timeout.')
-            e = None
-            p.terminate()
+            p.kill()
             p.join(10)
             if p.exitcode is None:
-                p.kill()
-                p.join(10)
-                if p.exitcode is None:
-                    raise Exception(f'Cannot terminate multiprocess running {fn.__name__}')
-        else:
-            e = p.exitcode
+                raise Exception(f'Cannot terminate multiprocess running {fn.__name__}')
     else:
-        t0 = time.perf_counter()
-        try:
-            fn()
-        except Exception as e:
-            e = str(e)
-        else:
-            e = 0
+        e = p.exitcode
     t = time.perf_counter() - t0
     return t, e
 
+
+def _import_pymupdf(install):
+    '''
+    Imports `fitz` from directory `install` by temporarily modifying
+    `sys.path`.
+    '''
+    #log(f'_import_pymupdf(): {install=}')
+    sys.path.insert(0, install)
+    try:
+        import fitz
+        #log(f'Have imported fitz. {install=} {fitz.__file__=}')
+        assert fitz.__file__.startswith(install), f'Failed to import fitz from {install}: {fitz.__file__=}'
+    finally:
+        del sys.path[0]
+
+
+def _make_pymupdf_version_variants(pymupdfs, new_globals):
+    '''
+    Creates `get_version_pymupdf_<variant>()` functions which return PyMuPDF
+    version.
+
+    As of 2023-02-21 these functions are not actually called.
+    '''
+    for variant, install_dir in pymupdfs.items():
+        fnname2 = f'get_version_pymupdf_{variant}'
+        def fn2(queue, install_dir=install_dir):
+            log(f'_make_pymupdf_version_variants():fn2(): {variant=} {install_dir=}')
+            _import_pymupdf(install_dir)
+            version = get_version_pymupdf()
+            queue.put(version)
+        new_globals[fnname2] = fn2
+        
+
+def _make_pymupdf_variants(fnname, fn, pymupdfs, new_globals, toolnames):
+    '''
+    Creates `<fnname>_<variant>()` functions which import a specific build of
+    PyMuPDF and then call `fn()`. These functions generally need to be run in a
+    different process, because re-import of a different PyMuPDF module does not
+    work.
+    '''
+    #log(f'_make_pymupdf_variants(): {fnname=} {fn=}')
+    for variant, install_dir in pymupdfs.items():
+        fnname2 = f'{fnname}_{variant}'
+        # For reasons i don't understand, we need to pass `install_dir` as a
+        # default param here, otherwise fn2() can see the wrong value.
+        def fn2(path, install_dir=install_dir):
+            #log(f'_make_pymupdf_variants():fn2(): {variant=} {install_dir=} {fn2=} {fn=}')
+            _import_pymupdf(install_dir)
+            fn(path)
+        assert fnname2 not in new_globals
+        new_globals[fnname2] = fn2
+        #log(f'_make_pymupdf_variants(): have added {fnname2=} {fn2=}')
+        if toolnames:
+            toolnames.add(f'pymupdf_{variant}')
+        
 
 # Tool version functions.
 #
@@ -273,8 +348,38 @@ def time_it(fn, mp_timeout):
 #
 
 def get_version_pymupdf():
+    # Returns a dict with verion information, including detailed git
+    # information about PyMuPDF and MuPDF.
+    #
     import fitz
-    return fitz.version
+    log(f'get_version_pymupdf(): {fitz.__file__=} {fitz.version=}')
+    pymupdf_version = fitz.version
+
+    pymupdf_git_sha     = getattr(fitz, 'pymupdf_git_sha', None)
+    pymupdf_git_comment = getattr(fitz, 'pymupdf_git_comment', None)
+    pymupdf_git_diff    = getattr(fitz, 'pymupdf_git_diff', None)
+    pymupdf_git_branch  = getattr(fitz, 'pymupdf_git_branch', None)
+
+    mupdf_git_sha       = getattr(fitz, 'mupdf_git_sha', None)
+    mupdf_git_comment   = getattr(fitz, 'mupdf_git_comment', None)
+    mupdf_git_diff      = getattr(fitz, 'mupdf_git_diff', None)
+    mupdf_git_branch    = getattr(fitz, 'mupdf_git_branch', None)
+    
+    mupdf_version = fitz.mupdf_version_tuple
+    return dict(
+            pymupdf=pymupdf_version,
+
+            pymupdf_git_sha=pymupdf_git_sha,
+            pymupdf_git_comment=pymupdf_git_comment,
+            #pymupdf_git_diff=pymupdf_git_diff,
+            pymupdf_git_branch=pymupdf_git_branch,
+
+            mupdf_git_sha=mupdf_git_sha,
+            mupdf_git_comment=mupdf_git_comment,
+            #mupdf_git_diff=mupdf_git_diff,
+            mupdf_git_branch=mupdf_git_branch,
+            
+            )
 
 def get_version_pdfrw():
     import pdfrw
@@ -356,7 +461,9 @@ def do_render_pymupdf(path):
     doc = fitz.open(path)
     for page in doc:
         pix = page.get_pixmap(dpi=150)
-        pix.save(f'{path}.render.pymupdf-image-{page.number}.png')
+        out = f'{path}.render.pymupdf-image-{page.number}.png'
+        pix.save(out)
+        log(f'Have written to: {out}')
         pix = None
     doc.close()
 
@@ -392,7 +499,7 @@ def log(text):
     sys.stdout.flush()
 
 
-def pymupdf_install(pymupdf_location, mupdf_location):
+def pymupdf_install(pymupdf_location, mupdf_location, root, local_git_dir):
     '''
     Builds and installs PyMuPDF using pip.
 
@@ -405,6 +512,9 @@ def pymupdf_install(pymupdf_location, mupdf_location):
     mupdf_location:
         If not None, is used for PyMuPDF/setup.py's PYMUPDF_SETUP_MUPDF_BUILD,
         e.g.: git:--branch master https://github.com/ArtifexSoftware/mupdf.git
+
+    root:
+        Directory into which we install.
     '''
     if not pymupdf_location:
         return
@@ -412,7 +522,7 @@ def pymupdf_install(pymupdf_location, mupdf_location):
     git_prefix = 'git:'
     if pymupdf_location.startswith(git_prefix):
         command_suffix = pymupdf_location[len(git_prefix):]
-        pymupdf_location = 'PyMuPDF'
+        pymupdf_location = local_git_dir or 'PyMuPDF'
         
         command = f'git clone'
         command += f' --depth 1'
@@ -432,13 +542,23 @@ def pymupdf_install(pymupdf_location, mupdf_location):
     # Build PyMuPDF.
     env = ''
     if mupdf_location:
-        env = f'PYMUPDF_SETUP_MUPDF_BUILD={os.path.relpath(mupdf_location, pymupdf_location)} PYMUPDF_SETUP_MUPDF_TGZ='
+        env = 'PYMUPDF_SETUP_MUPDF_TGZ= '
+        if mupdf_location.startswith('git:'):
+            env += f'PYMUPDF_SETUP_MUPDF_BUILD="{mupdf_location}"'
+        else:
+            env += f'PYMUPDF_SETUP_MUPDF_BUILD="{os.path.relpath(mupdf_location, pymupdf_location)}"'
     if platform.system() == 'OpenBSD':
         # Need to use system clang-python and swig because they are not
         # available in pypi.org and building from sdist fails.
         command = f'cd {pymupdf_location} && {env} python3 setup.py install'
+        if root:
+            command = f'{command} --root {os.path.relpath(root, pymupdf_location)}'
     else:
         command = f'cd {pymupdf_location} && {env} pip install -v .'
+        if root:
+            # This creates `<root>/fitz/{fitz.py,...}`.
+            command = f'{command} --upgrade --target {os.path.relpath(root, pymupdf_location)}'
+    
     log( f'Running: {command}')
     subprocess.run( command, shell=1, check=1)
 
@@ -449,7 +569,9 @@ if __name__ == '__main__':
     internal_check = False
     do = None
     mupdf_location = None
-    pymupdf_location = None
+    mupdf_master_location = 'git:--branch master https://github.com/ArtifexSoftware/mupdf.git'
+    mupdf_branch_location = 'git:--branch 1.21.x https://github.com/ArtifexSoftware/mupdf.git'
+    pymupdf_location = 'git:--branch 1.21 https://github.com/pymupdf/PyMuPDF.git'
     pymupdf_build = True
     timeout = None
     tests = []
@@ -471,6 +593,12 @@ if __name__ == '__main__':
 
         elif arg == '--mupdf':
             mupdf_location = next(args)
+
+        elif arg == '--mupdf-branch':
+            mupdf_branch_location = next(args)
+
+        elif arg == '--mupdf-master':
+            mupdf_master_location = next(args)
 
         elif arg == '--path':
             paths.append(next(args))
@@ -523,12 +651,31 @@ if __name__ == '__main__':
         sys.exit()
 
     else:
-        if pymupdf_build:
-            pymupdf_install(pymupdf_location, mupdf_location)
+        pymupdfs = dict()
+        if pymupdf_location == '0':
+            pymupdf_location = None
+        if mupdf_master_location == '0':
+            mupdf_master_location = None
+        if mupdf_branch_location == '0':
+            mupdf_branch_location = None
+
+        if pymupdf_location and mupdf_master_location:
+            location = os.path.abspath(f'{__file__}/../install-pymupdf-mupdf-master')
+            if pymupdf_build:
+                pymupdf_install(pymupdf_location, mupdf_master_location, location, 'PyMuPDF-mupdf-master')
+            pymupdfs['mupdf_master'] = location
+
+        if pymupdf_location and mupdf_branch_location:
+            location = os.path.abspath(f'{__file__}/../install-pymupdf-mupdf-branch')
+            if pymupdf_build:
+                pymupdf_install(pymupdf_location, mupdf_branch_location, location, 'PyMuPDF-mupdf-branch')
+            pymupdfs['mupdf_branch'] = location
+        
         performance(
                 tests=tests,
                 paths=paths,
                 tools=tools,
                 timeout=timeout,
                 internal_check=internal_check,
+                pymupdfs=pymupdfs,
                 )

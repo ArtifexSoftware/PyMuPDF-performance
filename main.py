@@ -47,6 +47,7 @@ Args:
         Add <path> to list of paths to test; can be specified multiple
         times. If not specified, we test with all input files.
 
+    --mupdfpy <mupdfpy-location>
     --pymupdf <pymupdf-location>
 
         Set location of PyMuPDF. If specified, we build PyMuPDF and install
@@ -115,7 +116,8 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     if paths:
         pathnames = paths
     else:
-        pathnames = [
+        pathnames = []
+        for leaf in [
                 'DB-Systems.pdf',
                 'PyMuPDF.pdf',
                 'adobe.pdf',
@@ -125,7 +127,9 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
                 'pandas.pdf',
                 'pythonbook.pdf',
                 'sample-50-MB-pdf-file.pdf',
-                ]
+                ]:
+            path = os.path.relpath( os.path.abspath( f'{__file__}/../{leaf}'))
+            pathnames.append( path)
 
     # Find all do_<testname>_<toolname>() functions, and derive all test names
     # and tool names.
@@ -568,10 +572,10 @@ if __name__ == '__main__':
     venv_install = True
     internal_check = False
     do = None
-    mupdf_location = None
     mupdf_master_location = 'git:--branch master https://github.com/ArtifexSoftware/mupdf.git'
     mupdf_branch_location = 'git:--branch 1.21.x https://github.com/ArtifexSoftware/mupdf.git'
     pymupdf_location = 'git:--branch 1.21 https://github.com/pymupdf/PyMuPDF.git'
+    mupdfpy_location = 'git:https://github.com/ArtifexSoftware/mupdfpy-julian.git'
     pymupdf_build = True
     timeout = None
     tests = []
@@ -591,9 +595,6 @@ if __name__ == '__main__':
         elif arg == '--internal-check':
             internal_check = int(next(args))
 
-        elif arg == '--mupdf':
-            mupdf_location = next(args)
-
         elif arg == '--mupdf-branch':
             mupdf_branch_location = next(args)
 
@@ -605,6 +606,9 @@ if __name__ == '__main__':
 
         elif arg == '--pymupdf':
             pymupdf_location = next(args)
+
+        elif arg == '--mupdfpy':
+            mupdfpy_location = next(args)
 
         elif arg == '--pymupdf-build':
             pymupdf_build = int(next(args))
@@ -654,6 +658,8 @@ if __name__ == '__main__':
         pymupdfs = dict()
         if pymupdf_location == '0':
             pymupdf_location = None
+        if mupdfpy_location == '0':
+            mupdfpy_location = None
         if mupdf_master_location == '0':
             mupdf_master_location = None
         if mupdf_branch_location == '0':
@@ -671,6 +677,12 @@ if __name__ == '__main__':
                 pymupdf_install(pymupdf_location, mupdf_branch_location, location, 'PyMuPDF-mupdf-branch')
             pymupdfs['mupdf_branch'] = location
         
+        if mupdfpy_location and mupdf_master_location:
+            location = os.path.abspath(f'{__file__}/../install-mupdfpy-mupdf-master')
+            if pymupdf_build:
+                pymupdf_install(mupdfpy_location, mupdf_master_location, location, 'mupdfpy-mupdf-master')
+            pymupdfs['mupdfpy_mupdf_master'] = location
+
         performance(
                 tests=tests,
                 paths=paths,

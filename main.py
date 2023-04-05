@@ -29,6 +29,15 @@ JSON format:
             #
             toolname:str: version
         }
+        'platform':
+        {
+            # Various items from the `platform` module, such as:
+            'processor':                'amd64'
+            'python_implementation':    'CPython'
+            'python_version':           '3.9.16'
+            'system':                   'OpenBSD'
+            ...
+        }
     }
 
 Args:
@@ -163,6 +172,22 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     results['toolversions'] = dict()
     results['data'] = list()
 
+    # Find platform info. We use all items in the `platform` module that are
+    # callable with no parameters. We exclude items whose names start with '_'
+    # or whose values cannot be serialised by json.dumps().
+    #
+    results['platform'] = dict()
+    for name, v in platform.__dict__.items():
+        if name.startswith('_'):
+            continue
+        try:
+            value = v()
+            _ = json.dumps(value)
+        except Exception:
+            continue
+        results['platform'][name] = value
+        #log(f'Setting results["platform"]["{name}"] to: {value!r}')
+
     # Find tool versions.
     #
     for toolname in toolnames:
@@ -249,14 +274,16 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
 
     # Save results locally.
     #
-    with open(name, 'w') as f:
+    name2 = os.path.relpath( os.path.abspath( f'{__file__}/../{name}'))
+    name_latest2 = os.path.relpath( os.path.abspath( f'{__file__}/../{name_latest}'))
+    with open(name2, 'w') as f:
         json.dump(results, f, indent='    ', sort_keys=1)
-    log(f'Have written results to: {name}')
+    log(f'Have written results to: {name2}')
     try:
-        os.remove(name_latest)
+        os.remove(name_latest2)
     except Exception:
         pass
-    os.symlink(name, name_latest)
+    os.symlink(name, name_latest2)
     log(f'Have created symlink: {name_latest} -> {name}')
 
 

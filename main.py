@@ -38,6 +38,7 @@ JSON format:
             'system':                   'OpenBSD'
             ...
         }
+        'date': 1680704072.1528542
     }
 
 Args:
@@ -116,6 +117,8 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
         Dict mapping PyMuPDF build identifiers such as 'mupdf-master', to
         directory containing installation's `fitz/` directory.
     '''
+    time_now = time.time()
+
     log(f'PyMuPDF variants are:')
     for n, v in pymupdfs.items():
         log(f'    {n}: {v}')
@@ -171,6 +174,9 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     results = dict()
     results['toolversions'] = dict()
     results['data'] = list()
+    results['date'] = dict()
+    results['date']['seconds'] = time_now
+    results['date']['string'] = time.strftime("%Y-%m-%d-%H-%M", time.gmtime( time_now))
 
     # Find platform info. We use all items in the `platform` module that are
     # callable with no parameters. We exclude items whose names start with '_'
@@ -265,7 +271,7 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
         name_prefix = 'internal_results'
     else:
         name_prefix = 'results'
-    name = f'{name_prefix}-{time.strftime("%Y-%m-%d-%H-%M")}.json'
+    name = f'{name_prefix}-{time.strftime("%Y-%m-%d-%H-%M", time.gmtime( time_now))}.json'
     name_latest = f'{name_prefix}-latest.json'
     
     # Push results to Github results repository.

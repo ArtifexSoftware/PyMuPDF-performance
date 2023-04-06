@@ -29,15 +29,15 @@ def addpush_json(results, name, name_latest):
         name_latest:
             Name of softlink to create that links to `name`.
 
-    We requires environment variable PYMUPDF_PERFORMANCE_RESULTS_RW to be set
-    to github access token. If not present, we return quietly.
+    We require environment variable PYMUPDF_PERFORMANCE_RESULTS_RW to be set to
+    github access token. If not present, we return quietly.
     '''
     remote = f'git@github.com:ArtifexSoftware/PyMuPDF-performance-results'
     remote_leaf = os.path.basename(remote)
 
     gh_key = os.environ.get('PYMUPDF_PERFORMANCE_RESULTS_RW')
     if gh_key is None:
-        main.log(f'Not pushing to ArtifexSoftware/PyMuPDF-performance because PYMUPDF_PERFORMANCE_RESULTS_RW not set')
+        main.log(f'Not pushing to {remote} because PYMUPDF_PERFORMANCE_RESULTS_RW not set')
         return
 
     ssh_id_path = os.path.abspath('ssh_id')

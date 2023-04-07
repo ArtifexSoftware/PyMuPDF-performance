@@ -442,6 +442,10 @@ def get_version_poppler():
     cp = subprocess.run('pdftotext -v', shell=1, check=1, capture_output=1, text=1)
     return cp.stdout + cp.stderr
 
+def get_version_pypdfium2():
+    return None
+
+
 # Performance test functions.
 #
 # Functions should be called `do_<testname>_<toolname>()`.
@@ -477,6 +481,11 @@ def do_copy_pypdf2(path):
     pdfmerge.write(f'{path}.copy.pypdf2')
     pdfmerge.close()
 
+def do_copy_pypdfium2(path):
+    import pypdfium2
+    doc = pypdfium2.PdfDocument(path)
+    doc.save(f'{path}.copy.pypdfium2')
+    
 
 # do_render_*()
 #
@@ -504,6 +513,18 @@ def do_render_pymupdf(path):
         pix = None
     doc.close()
 
+def do_render_pypdfium2(path):
+    import pypdfium2
+    doc = pypdfium2.PdfDocument(path)
+    for i in range(len(doc)):
+        page = doc[i]
+        bitmap = page.render(scale=150 / 72)
+        img = bitmap.to_pil()
+        out = f'{path}.render.pypdfium2-image-{i}.png'
+        img.save(out)
+        log(f'Have written to: {out}')
+    doc.close()
+
 
 # do_text_*()
 #
@@ -526,6 +547,13 @@ def do_text_pypdf2(path):
     reader = PyPDF2.PdfReader(path)
     for page in reader.pages:
         page.extract_text()
+
+def do_text_pypdfium2(path):
+    import pypdfium2
+    doc = pypdfium2.PdfDocument(path)
+    for page in doc:
+        page.get_textpage().get_text_range()
+    doc.close()
 
 
 # Other
@@ -678,7 +706,7 @@ if __name__ == '__main__':
         # Install Python packages from pypi.org.
         if venv_install:
             command += f' && python -m pip install --upgrade pip'
-            command += f' && python -m pip install --upgrade pypdf2 pdfminer.six pdfrw pikepdf pdf2jpg'
+            command += f' && python -m pip install --upgrade pypdf2 pdfminer.six pdfrw pikepdf pdf2jpg pypdfium2'
             if not pymupdf_location:
                 command += ' && python -m pip install --upgrade pymupdf'
         # Rerun ourselves inside the venv.

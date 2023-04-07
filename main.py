@@ -71,6 +71,8 @@ Args:
         Otherwise location is a directory on local machine (typically a
         checkout of PyMuPDF).
 
+        If <...-location> is '' or '0', we don't use mupdfpy/pymupdf at all.
+
     --pymupdf-build 0|1
         If 0, do not rebuild PyMuPDF. Default is 1.
 
@@ -112,10 +114,9 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
         internal_check:
             If true we don't actually run tests but instead pretend that all
             timings are 1.
-
-    pymupdfs:
-        Dict mapping PyMuPDF build identifiers such as 'mupdf-master', to
-        directory containing installation's `fitz/` directory.
+        pymupdfs:
+            Dict mapping PyMuPDF build identifiers such as 'mupdf-master', to
+            directory containing installation's `fitz/` directory.
     '''
     time_now = time.time()
 

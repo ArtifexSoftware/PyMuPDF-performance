@@ -48,7 +48,10 @@ Args:
         If 1, we don't run performance fns, instead pretending each one took 1
         second. Used to check the code.
 
-    --mupdf <mupdf-location>
+    --mupdfpy <location>
+    --pymupdf <location>
+    --mupdf-branch <location>
+    --mupdf-master <location>
 
         Set location of MuPDF when building PyMuPDF. Similar to --pymupdf. Internally
         we set PYMUPDF_SETUP_MUPDF_BUILD to <mupdf-location>.
@@ -56,6 +59,10 @@ Args:
     --path <path>
         Add <path> to list of paths to test; can be specified multiple
         times. If not specified, we test with all input files.
+    
+    --pip-install 0|1
+        If 0 we don't install python packages; saves a little time if venv
+        already set up.
 
     --mupdfpy <mupdfpy-location>
     --pymupdf <pymupdf-location>
@@ -79,6 +86,12 @@ Args:
     --timeout <timeout>
         Set fixed timeout for all tests. Otherwise we use hard-coded variable
         timeouts.
+    
+    --tool <toolname>
+        Can be specified multiple times. Test specified tools only.
+        
+        To test PyMuPDF use `--tool pymupdf_mupdf_master` or `--tool
+        pymupdf_mupdf_branch`.
 
     --venv-install 0|1
 
@@ -91,16 +104,18 @@ Args:
 import json
 import multiprocessing
 import os
+import pickle
 import platform
 import re
 import subprocess
 import sys
+import tempfile
 import time
 
 import github
 
 
-def performance(tests=None, paths=None, tools=None, timeout=None, internal_check=None, pymupdfs=None):
+def performance(tests=None, paths=None, tools=None, timeout=None, internal_check=None):
     '''
     Runs performance tests and saves to JSON results file whose name contains
     current date/time.
@@ -114,15 +129,8 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
         internal_check:
             If true we don't actually run tests but instead pretend that all
             timings are 1.
-        pymupdfs:
-            Dict mapping PyMuPDF build identifiers such as 'mupdf-master', to
-            directory containing installation's `fitz/` directory.
     '''
     time_now = time.time()
-
-    log(f'PyMuPDF variants are:')
-    for n, v in pymupdfs.items():
-        log(f'    {n}: {v}')
 
     # Input files.
     #
@@ -150,25 +158,19 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     testnames = set(tests) if tests else set()
     toolnames = set(tools) if tools else set()
 
-    # Define functions that call pymupdf variants.
+    # Find tests.
     #
-    new_globals = dict()
-    _make_pymupdf_version_variants(pymupdfs, new_globals)
     for fnname, fn in globals().items():
         match = re.match(f'^do_([a-z]+)_([a-z0-9_]+)$', fnname)
         if match:
             testname = match.group(1)
             toolname = match.group(2)
+            if toolname == 'pymupdf':
+                continue
             if not tests:
                 testnames.add(testname)
-            if toolname == 'pymupdf':
-                _make_pymupdf_variants(fnname, fn, pymupdfs, new_globals, None if tools else toolnames)
-            elif not tools:
+            if not tools:
                 toolnames.add(toolname)
-
-    for n, v in new_globals.items():
-        #log(f'Setting globals({n}) to {v}')
-        globals()[n] = v
 
     # Set up results dict.
     #
@@ -199,23 +201,12 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     #
     for toolname in toolnames:
         name = f'get_version_{toolname}'
-        toolversions_fn = globals().get(name)
-        if not toolversions_fn:
+        toolversion_fn = globals().get(name)
+        if not toolversion_fn:
             raise Exception(f'Need function {name}() to find version of {toolname=}.')
-        if toolname.startswith('pymupdf'):
-            # We must not import this pymupdf because it will make it
-            # impossible to import a different pymupdf variant later on. So we
-            # use `multiprocessing`, receiving the version via a queue.
-            #
-            queue = multiprocessing.Queue()
-            p = multiprocessing.Process(target=toolversions_fn, args=(queue,))
-            p.start()
-            version = queue.get()
-            p.join()
-            log('Have called pymupdf version fn. {version=}')
-        else:
-            version = toolversions_fn()
-        results['toolversions'][toolname] = version
+        
+        t, e, version, ee = multiprocessing_run(toolversion_fn, 30)
+        results['toolversions'][toolname] = ee if ee else version
 
     log(f'testnames:\n{json.dumps(list(testnames), indent="    ", sort_keys=1)}')
     log(f'toolnames:\n{json.dumps(list(toolnames), indent="    ", sort_keys=1)}')
@@ -243,7 +234,7 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
         i += 1
         log(f'### {i}/{num_tests}: {testname=} {path=} {toolname=} {fn.__name__=}')
         if internal_check:
-            t, e = 1, 0
+            t, e, ret = 1, 0, None
         else:
             if timeout:
                 timeout2 = timeout
@@ -253,14 +244,14 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
                 timeout2 = 600
             else:
                 timeout2 = 300
-            t, e = time_it(lambda : fn(path), timeout2)
-        log(f'### {i}/{num_tests}: {testname=} {path=} {toolname=} {fn.__name__=}: {t=} {e=}')
+            t, e, ret, ee = multiprocessing_run(lambda : fn(path), timeout2)
+        log(f'### {i}/{num_tests}: {testname=} {path=} {toolname=} {fn.__name__=}: {t=} {ee=}')
         result = dict(
                 testname=testname,
                 path=path,
                 toolname=toolname,
                 t=t,
-                e=e,
+                e=ee,
                 )
         results['data'].append(result)
 
@@ -294,89 +285,90 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     log(f'Have created symlink: {name_latest} -> {name}')
 
 
-def time_it(fn, timeout):
+def multiprocessing_run(fn, timeout):
     '''
     Runs `fn()` in a separate process using Python's `multiprocessing`
     module.
     
-    Returns (t, e). `t` is the time in seconds to run fn(). `e` is 0 on
-    success, None if timeout, non-zero error code or string exception text.
+    Returns (t, e, ret, ee):
+        t: is the time in seconds to run fn().
+        
+        e: 0 on success, or None on timeout, or non-zero exit code from
+        multiprocessing.Process, or an Exception instance raised by internal
+        call of pickle.load().
+        
+        ret: Value returned by, or exception raised by, fn(). None if timeout
+        or multiprocessing.Process invocation failed.
+        
+        ee: Convenience error information. A non-empty error description string
+        if e is not 0 or ret is an Exception instance; otherwise 0.
     '''
-    p = multiprocessing.Process(target=fn)
-    t0 = time.perf_counter()
-    p.start()
-    p.join(timeout)
-    if p.exitcode is None:
-        # Timeout.
-        log(f'Multiprocessing timeout.')
-        e = None
-        p.terminate()
-        p.join(10)
+    # We don't use a multiprocessing.Queue() to read version from child
+    # process, because multiprocessing.Queue.get() hangs if the child
+    # process fails. Instead we use a temporary file; this requires that
+    # toolversions_fn() calls temp_file.flush() (or .close()) before returning,
+    # otherwise we can get error from pickle.load().
+    #
+    with tempfile.TemporaryFile() as temp_file:
+        def fn2(fn, temp_file):
+            try:
+                ret = fn()
+            except Exception as e:
+                ret = e
+            pickle.dump(ret, temp_file)
+            temp_file.flush()
+        p = multiprocessing.Process(target=fn2, args=(fn, temp_file))
+        t0 = time.perf_counter()
+        p.start()
+        p.join(timeout)
+        t = time.perf_counter() - t0
+        #log(f'multiprocessing_run {fn=} {timeout=}: {p.exitcode=}')
         if p.exitcode is None:
-            p.kill()
+            # Timeout.
+            #log(f'Multiprocessing timeout.')
+            e = None
+            ret = None
+            p.terminate()
             p.join(10)
             if p.exitcode is None:
-                raise Exception(f'Cannot terminate multiprocess running {fn.__name__}')
-    else:
-        e = p.exitcode
-    t = time.perf_counter() - t0
-    return t, e
+                p.kill()
+                p.join(10)
+                if p.exitcode is None:
+                    raise Exception(f'Cannot terminate multiprocess running {fn.__name__}')
+        else:
+            temp_file.seek(0)
+            e = 0
+            ret = None
+            try:
+                ret = pickle.load(temp_file)
+            except Exception as ee:
+                e = ee
+            if p.exitcode:
+                e = p.exitcode
+        if e is None:
+            ee = 'Timeout'
+        elif e != 0:
+            ee = f'multiprocessing.Process failure {e=}'
+        elif isinstance(ret, Exception):
+            ee = f'{type(ret)}: {ret}'
+        else:
+            ee = 0
+        return t, e, ret, ee
 
 
-def _import_pymupdf(install):
+def _import_pymupdf(install_dir):
     '''
     Imports `fitz` from directory `install` by temporarily modifying
     `sys.path`.
     '''
-    #log(f'_import_pymupdf(): {install=}')
-    sys.path.insert(0, install)
+    assert isinstance(install_dir, str)
+    sys.path.insert(0, install_dir)
     try:
         import fitz
-        #log(f'Have imported fitz. {install=} {fitz.__file__=}')
-        assert fitz.__file__.startswith(install), f'Failed to import fitz from {install}: {fitz.__file__=}'
+        assert fitz.__file__.startswith(install_dir), f'Failed to import fitz from {install}: {fitz.__file__=}'
     finally:
         del sys.path[0]
 
-
-def _make_pymupdf_version_variants(pymupdfs, new_globals):
-    '''
-    Creates `get_version_pymupdf_<variant>()` functions which return PyMuPDF
-    version.
-
-    As of 2023-02-21 these functions are not actually called.
-    '''
-    for variant, install_dir in pymupdfs.items():
-        fnname2 = f'get_version_pymupdf_{variant}'
-        def fn2(queue, install_dir=install_dir):
-            log(f'_make_pymupdf_version_variants():fn2(): {variant=} {install_dir=}')
-            _import_pymupdf(install_dir)
-            version = get_version_pymupdf()
-            queue.put(version)
-        new_globals[fnname2] = fn2
-        
-
-def _make_pymupdf_variants(fnname, fn, pymupdfs, new_globals, toolnames):
-    '''
-    Creates `<fnname>_<variant>()` functions which import a specific build of
-    PyMuPDF and then call `fn()`. These functions generally need to be run in a
-    different process, because re-import of a different PyMuPDF module does not
-    work.
-    '''
-    #log(f'_make_pymupdf_variants(): {fnname=} {fn=}')
-    for variant, install_dir in pymupdfs.items():
-        fnname2 = f'{fnname}_{variant}'
-        # For reasons i don't understand, we need to pass `install_dir` as a
-        # default param here, otherwise fn2() can see the wrong value.
-        def fn2(path, install_dir=install_dir):
-            #log(f'_make_pymupdf_variants():fn2(): {variant=} {install_dir=} {fn2=} {fn=}')
-            _import_pymupdf(install_dir)
-            fn(path)
-        assert fnname2 not in new_globals
-        new_globals[fnname2] = fn2
-        #log(f'_make_pymupdf_variants(): have added {fnname2=} {fn2=}')
-        if toolnames:
-            toolnames.add(f'pymupdf_{variant}')
-        
 
 # Tool version functions.
 #
@@ -390,7 +382,6 @@ def get_version_pymupdf():
     # information about PyMuPDF and MuPDF.
     #
     import fitz
-    log(f'get_version_pymupdf(): {fitz.__file__=} {fitz.version=}')
     pymupdf_version = fitz.version
 
     pymupdf_git_sha     = getattr(fitz, 'pymupdf_git_sha', None)
@@ -570,17 +561,16 @@ def pymupdf_install(pymupdf_location, mupdf_location, root, local_git_dir):
     Builds and installs PyMuPDF using pip.
 
     pymupdf_location:
-        Path of PyMuPDF directory in which to build PyMuPDF.
-        
-        Or git location, similar to PyMuPDF/setup.py's PYMUPDF_SETUP_MUPDF_BUILD,
-        e.g.: git:--branch master https://github.com/ArtifexSoftware/PyMupDF.git
+        None, Path of PyMuPDF directory or git location of PyMuPDF, e.g.:
+        git:--branch master https://github.com/ArtifexSoftware/PyMuPDF.git
 
     mupdf_location:
-        If not None, is used for PyMuPDF/setup.py's PYMUPDF_SETUP_MUPDF_BUILD,
-        e.g.: git:--branch master https://github.com/ArtifexSoftware/mupdf.git
-
+        None, Path of MuPDF directory, or gitlocation of MuPDF, e.g.:
+        git:--branch master https://github.com/ArtifexSoftware/mupdf.git
     root:
-        Directory into which we install.
+        Directory into which we install fitz.
+    local_git_dir:
+        Local git directory if `pymupdf_location` starts with 'git:'.
     '''
     if not pymupdf_location:
         return
@@ -603,7 +593,7 @@ def pymupdf_install(pymupdf_location, mupdf_location, root, local_git_dir):
         sys.stdout.flush()
         subprocess.run( command, shell=1, check=0)
 
-    assert os.path.isdir(pymupdf_location)
+    assert os.path.isdir(pymupdf_location), f'{pymupdf_location=}'
 
     # Build PyMuPDF.
     env = ''
@@ -624,7 +614,6 @@ def pymupdf_install(pymupdf_location, mupdf_location, root, local_git_dir):
         if root:
             # This creates `<root>/fitz/{fitz.py,...}`.
             command = f'{command} --upgrade --target {os.path.relpath(root, pymupdf_location)}'
-    
     log( f'Running: {command}')
     subprocess.run( command, shell=1, check=1)
 
@@ -639,6 +628,7 @@ if __name__ == '__main__':
     pymupdf_location = 'git:--branch 1.21 https://github.com/pymupdf/PyMuPDF.git'
     mupdfpy_location = 'git:https://github.com/ArtifexSoftware/mupdfpy-julian.git'
     pymupdf_build = True
+    pip_install = True
     timeout = None
     tests = []
     paths = []
@@ -665,6 +655,9 @@ if __name__ == '__main__':
 
         elif arg == '--path':
             paths.append(next(args))
+        
+        elif arg == '--pip-install':
+            pip_install = int(next(args))
 
         elif arg == '--pymupdf':
             pymupdf_location = next(args)
@@ -679,7 +672,9 @@ if __name__ == '__main__':
             timeout = float(next(args))
 
         elif arg == '--tool':
-            tools.append(next(args))
+            name = next(args)
+            assert not re.search( '[^a-zA-Z0-9_]', name), f'Tool name must contain just letters, numbers and underscores: {name!r}'
+            tools.append(name)
 
         elif arg == '--test':
             tests.append(next(args))
@@ -706,10 +701,11 @@ if __name__ == '__main__':
         command += f' && . pylocal/bin/activate'
         # Install Python packages from pypi.org.
         if venv_install:
-            command += f' && python -m pip install --upgrade pip'
-            command += f' && python -m pip install --upgrade pypdf2 pdfminer.six pdfrw pikepdf pdf2jpg pypdfium2'
-            if not pymupdf_location:
-                command += ' && python -m pip install --upgrade pymupdf'
+            if pip_install:
+                command += f' && python -m pip install --upgrade pip'
+                command += f' && python -m pip install --upgrade pypdf2 pdfminer.six pdfrw pikepdf pdf2jpg pypdfium2'
+                if not pymupdf_location:
+                    command += ' && python -m pip install --upgrade pymupdf'
         # Rerun ourselves inside the venv.
         command += f' && python {" ".join(sys.argv)}'
         log(f'Running: {command}')
@@ -717,7 +713,6 @@ if __name__ == '__main__':
         sys.exit()
 
     else:
-        pymupdfs = dict()
         if pymupdf_location == '0':
             pymupdf_location = None
         if mupdfpy_location == '0':
@@ -727,26 +722,77 @@ if __name__ == '__main__':
         if mupdf_branch_location == '0':
             mupdf_branch_location = None
 
-        if mupdfpy_location and mupdf_master_location:
-            location = os.path.abspath(f'{__file__}/../install-mupdfpy-mupdf-master')
+        if tools:
+            mupdfpy_mupdf_master = 'mupdfpy_mupdf_master' in tools
+            pymupdf_mupdf_master = 'pymupdf_mupdf_master' in tools
+            pymupdf_mupdf_branch = 'pymupdf_mupdf_branch' in tools
+        else:
+            mupdfpy_mupdf_master = True
+            pymupdf_mupdf_master = True
+            pymupdf_mupdf_branch = True
+        
+        def _make_pymupdf_variant(fnname, fn, install_dir):
+            '''
+            Make global function `{fnname}(path)` that imports fitz from
+            `install_dir` and calls `fn(path)`.
+            '''
+            def fn2(path, install_dir=install_dir):
+                _import_pymupdf(install_dir)
+                return fn(path)
+            assert getattr(globals(), fnname, None) is None
+            globals()[fnname] = fn2
+        
+        def _make_pymupdf_variants(install_dir, name):
+            '''
+            Makes global functions that import fitz from `install_dir` and call
+            get_version_pymupdf(), do_copy_pymupdf(), do_render_pymupdf() and
+            do_text_pymupdf(). Generated fns are called:
+            
+                get_version_{name}()
+                do_copy_{name}(path)
+                do_render_{name}(path)
+                do_text_{name}(path)
+            '''
+            def get_version(install_dir=install_dir):
+                log(f'_make_pymupdf_variants(): {install_dir=} {name=}')
+                _import_pymupdf(install_dir)
+                return get_version_pymupdf()
+            globals()[f'get_version_{name}'] = get_version
+            _make_pymupdf_variant(f'do_copy_{name}', do_copy_pymupdf, install_dir)
+            _make_pymupdf_variant(f'do_render_{name}', do_render_pymupdf, install_dir)
+            _make_pymupdf_variant(f'do_text_{name}', do_text_pymupdf, install_dir)
+
+        def _make(name, pymupdf_location, mupdf_location):
+            '''
+            Sets things up for PyMuPDF implementation called `name`, built from
+            `pymupdf_location` and `mupdf_location`.
+            '''
+            install_dir = os.path.abspath(f'{__file__}/../install_{name}')
+            _make_pymupdf_variants(install_dir, name)
             if pymupdf_build:
                 try:
-                    pymupdf_install(mupdfpy_location, mupdf_master_location, location, 'mupdfpy-mupdf-master')
+                    pymupdf_install(pymupdf_location, mupdf_location, install_dir, name)
                 except Exception as e:
-                    log(f'*** Ignoring exception from building mupdfpy: {e}')
-            pymupdfs['mupdfpy_mupdf_master'] = location
-
-        if pymupdf_location and mupdf_master_location:
-            location = os.path.abspath(f'{__file__}/../install-pymupdf-mupdf-master')
-            if pymupdf_build:
-                pymupdf_install(pymupdf_location, mupdf_master_location, location, 'PyMuPDF-mupdf-master')
-            pymupdfs['mupdf_master'] = location
-
-        if pymupdf_location and mupdf_branch_location:
-            location = os.path.abspath(f'{__file__}/../install-pymupdf-mupdf-branch')
-            if pymupdf_build:
-                pymupdf_install(pymupdf_location, mupdf_branch_location, location, 'PyMuPDF-mupdf-branch')
-            pymupdfs['mupdf_branch'] = location
+                    log(f'*** Ignoring exception from building {name=} {pymupdf_location=} {mupdf_location=}: {e}')
+        
+        if mupdfpy_mupdf_master:
+            _make(
+                    'mupdfpy_mupdf_master',
+                    mupdfpy_location,
+                    mupdf_master_location,
+                    )
+        if pymupdf_mupdf_master:
+            _make(
+                    'pymupdf_mupdf_master',
+                    pymupdf_location,
+                    mupdf_master_location,
+                    )
+        if pymupdf_mupdf_branch:
+            _make(
+                    'pymupdf_mupdf_branch',
+                    pymupdf_location,
+                    mupdf_branch_location,
+                    )
         
         performance(
                 tests=tests,
@@ -754,5 +800,4 @@ if __name__ == '__main__':
                 tools=tools,
                 timeout=timeout,
                 internal_check=internal_check,
-                pymupdfs=pymupdfs,
                 )

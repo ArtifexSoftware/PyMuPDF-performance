@@ -727,6 +727,15 @@ if __name__ == '__main__':
         if mupdf_branch_location == '0':
             mupdf_branch_location = None
 
+        if mupdfpy_location and mupdf_master_location:
+            location = os.path.abspath(f'{__file__}/../install-mupdfpy-mupdf-master')
+            if pymupdf_build:
+                try:
+                    pymupdf_install(mupdfpy_location, mupdf_master_location, location, 'mupdfpy-mupdf-master')
+                except Exception as e:
+                    log(f'*** Ignoring exception from building mupdfpy: {e}')
+            pymupdfs['mupdfpy_mupdf_master'] = location
+
         if pymupdf_location and mupdf_master_location:
             location = os.path.abspath(f'{__file__}/../install-pymupdf-mupdf-master')
             if pymupdf_build:
@@ -739,12 +748,6 @@ if __name__ == '__main__':
                 pymupdf_install(pymupdf_location, mupdf_branch_location, location, 'PyMuPDF-mupdf-branch')
             pymupdfs['mupdf_branch'] = location
         
-        if mupdfpy_location and mupdf_master_location:
-            location = os.path.abspath(f'{__file__}/../install-mupdfpy-mupdf-master')
-            if pymupdf_build:
-                pymupdf_install(mupdfpy_location, mupdf_master_location, location, 'mupdfpy-mupdf-master')
-            pymupdfs['mupdfpy_mupdf_master'] = location
-
         performance(
                 tests=tests,
                 paths=paths,

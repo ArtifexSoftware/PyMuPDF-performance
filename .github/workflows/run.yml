@@ -2,7 +2,7 @@ name: Run performance tests
 
 on:
   schedule:
-    - cron: '13 6 * * SAT'
+    - cron: '13 6 * * SAT,WED'
   workflow_dispatch:
 
 jobs:

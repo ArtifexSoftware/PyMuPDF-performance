@@ -624,7 +624,7 @@ if __name__ == '__main__':
     internal_check = False
     do = None
     mupdf_master_location = 'git:--branch master https://github.com/ArtifexSoftware/mupdf.git'
-    mupdf_branch_location = 'git:--branch 1.21.x https://github.com/ArtifexSoftware/mupdf.git'
+    mupdf_branch_location = 'git:--branch 1.22.x https://github.com/ArtifexSoftware/mupdf.git'
     pymupdf_location = 'git:--branch 1.21 https://github.com/pymupdf/PyMuPDF.git'
     mupdfpy_location = 'git:https://github.com/ArtifexSoftware/mupdfpy-julian.git'
     pymupdf_build = True

@@ -43,32 +43,30 @@ JSON format:
 
 Args:
 
+    --austin <austin>
+        Run everything via austin profiler; `austin` should be the austin
+        executable, e.g. ./austin-3.5.0-gnu-linux-amd64/austin
+    
+    --build-check 0|1
+        If 0 (the default), build failures are ignored.
+    
+    --cprofile 0|1
+        If 1, profile individual test runs with cProfile.
+
+    --perf 0|1
+        If 1, run with `perf record`.
+    
     --internal-check 0|1
 
         If 1, we don't run performance fns, instead pretending each one took 1
         second. Used to check the code.
 
-    --mupdfpy <location>
-    --pymupdf <location>
     --mupdf-branch <location>
     --mupdf-master <location>
+    --mupdfpy <location>
+    --pymupdf <location>
 
-        Set location of MuPDF when building PyMuPDF. Similar to --pymupdf. Internally
-        we set PYMUPDF_SETUP_MUPDF_BUILD to <mupdf-location>.
-
-    --path <path>
-        Add <path> to list of paths to test; can be specified multiple
-        times. If not specified, we test with all input files.
-    
-    --pip-install 0|1
-        If 0 we don't install python packages; saves a little time if venv
-        already set up.
-
-    --mupdfpy <mupdfpy-location>
-    --pymupdf <pymupdf-location>
-
-        Set location of PyMuPDF. If specified, we build PyMuPDF and install
-        into the venv; otherwise we install PyMuPDF from pypi.org.
+        Set location of MuPDF, mupdfpy and PyMuPDF checkouts. 
 
         If location starts with `git:`, the remaining text is used in a git
         clone command, for example:
@@ -78,10 +76,24 @@ Args:
         Otherwise location is a directory on local machine (typically a
         checkout of PyMuPDF).
 
-        If <...-location> is '' or '0', we don't use mupdfpy/pymupdf at all.
+        If <location> is '' or '0', we don't use mupdfpy/pymupdf at all.
+
+    --path <path>
+        Add <path> to list of paths to test; can be specified multiple
+        times. If not specified, we test with all input files.
+
+    --perf 0|1
+        If 1 we profile using `perf`.
+
+    --pip-install 0|1
+        If 0 we don't install python packages; saves a little time if venv
+        already set up.
 
     --pymupdf-build 0|1
-        If 0, do not rebuild PyMuPDF. Default is 1.
+        If 0, do not rebuild mupdfpy or PyMuPDF. Default is 1.
+
+    --test <testname>
+        Adds to list of testnames. If not specified we use all tests.
 
     --timeout <timeout>
         Set fixed timeout for all tests. Otherwise we use hard-coded variable
@@ -115,7 +127,15 @@ import time
 import github
 
 
-def performance(tests=None, paths=None, tools=None, timeout=None, internal_check=None):
+def performance(
+        tests=None,
+        paths=None,
+        tools=None,
+        timeout=None,
+        internal_check=None,
+        austin=None,
+        cprofile=None,
+        ):
     '''
     Runs performance tests and saves to JSON results file whose name contains
     current date/time.
@@ -205,7 +225,7 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
         if not toolversion_fn:
             raise Exception(f'Need function {name}() to find version of {toolname=}.')
         
-        t, e, version, ee = multiprocessing_run(toolversion_fn, 30)
+        t, e, version, ee = multiprocessing_run(toolversion_fn, 30, cprofile=cprofile)
         results['toolversions'][toolname] = ee if ee else version
 
     log(f'testnames:\n{json.dumps(list(testnames), indent="    ", sort_keys=1)}')
@@ -244,7 +264,16 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
                 timeout2 = 600
             else:
                 timeout2 = 300
-            t, e, ret, ee = multiprocessing_run(lambda : fn(path), timeout2)
+            if 1:
+                t, e, ret, ee = multiprocessing_run(lambda : fn(path), timeout2)
+            else:
+                # Don't use multiprocessing.
+                log(f'### Not using multiprocessing.')
+                t0 = time.perf_counter()
+                ret = fn(path)
+                t = time.perf_counter() - t0
+                e = 0
+                ee = 0
         log(f'### {i}/{num_tests}: {testname=} {path=} {toolname=} {fn.__name__=}: {t=} {ee=}')
         result = dict(
                 testname=testname,
@@ -285,7 +314,7 @@ def performance(tests=None, paths=None, tools=None, timeout=None, internal_check
     log(f'Have created symlink: {name_latest} -> {name}')
 
 
-def multiprocessing_run(fn, timeout):
+def multiprocessing_run(fn, timeout, cprofile=False):
     '''
     Runs `fn()` in a separate process using Python's `multiprocessing`
     module.
@@ -311,10 +340,30 @@ def multiprocessing_run(fn, timeout):
     #
     with tempfile.TemporaryFile() as temp_file:
         def fn2(fn, temp_file):
-            try:
-                ret = fn()
-            except Exception as e:
-                ret = e
+            # BTW trying to get austin to profile the current process with
+            # `f'austin -C -p {os.getpid()} -o out-austin2 &'` doesn't seem to
+            # generate any useful data.
+            if cprofile:
+                import cProfile
+                import pstats
+                with cProfile.Profile() as pr:
+                    try:
+                        ret = fn()
+                    except Exception as e:
+                        ret = e
+                ps = pstats.Stats(pr)
+                ps.sort_stats('calls', 'filename')
+                ps.print_stats()
+            else:
+                try:
+                    ret = fn()
+                except Exception as e:
+                    ret = e
+            if 0:
+                # Output extra resource usage information.
+                import resource
+                rusage = resource.getrusage( resource.RUSAGE_SELF)
+                print(f'{rusage=}')
             pickle.dump(ret, temp_file)
             temp_file.flush()
         p = multiprocessing.Process(target=fn2, args=(fn, temp_file))
@@ -365,7 +414,7 @@ def _import_pymupdf(install_dir):
     sys.path.insert(0, install_dir)
     try:
         import fitz
-        assert fitz.__file__.startswith(install_dir), f'Failed to import fitz from {install}: {fitz.__file__=}'
+        assert fitz.__file__.startswith(install_dir), f'Failed to import fitz from {install_dir}: {fitz.__file__=}'
     finally:
         del sys.path[0]
 
@@ -531,8 +580,13 @@ def do_text_poppler(path):
 def do_text_pymupdf(path):
     import fitz
     doc = fitz.open(path)
+    length = 0
     for page in doc:
-        page.get_text()
+        text = page.get_text()
+        l = len(text)
+        length += l
+    print(f'{length=}')
+        
 
 def do_text_pypdf2(path):
     import PyPDF2
@@ -625,7 +679,7 @@ if __name__ == '__main__':
     do = None
     mupdf_master_location = 'git:--branch master https://github.com/ArtifexSoftware/mupdf.git'
     mupdf_branch_location = 'git:--branch 1.22.x https://github.com/ArtifexSoftware/mupdf.git'
-    pymupdf_location = 'git:--branch 1.21 https://github.com/pymupdf/PyMuPDF.git'
+    pymupdf_location = 'git:--branch main https://github.com/pymupdf/PyMuPDF.git'
     mupdfpy_location = 'git:https://github.com/ArtifexSoftware/mupdfpy-julian.git'
     pymupdf_build = True
     pip_install = True
@@ -633,6 +687,11 @@ if __name__ == '__main__':
     tests = []
     paths = []
     tools = []
+    austin = False
+    cprofile = False
+    build_check = False
+    perf = False
+
     args = iter(sys.argv[1:])
     while 1:
         try:
@@ -643,6 +702,15 @@ if __name__ == '__main__':
         if arg == '-h' or arg == '--help':
             log(__doc__)
             sys.exit()
+
+        elif arg == '--austin':
+            austin = next(args)
+
+        elif arg == '--build-check':
+            build_check = int( next(args))
+
+        elif arg == '--cprofile':
+            cprofile = int(next(args))
 
         elif arg == '--internal-check':
             internal_check = int(next(args))
@@ -656,6 +724,9 @@ if __name__ == '__main__':
         elif arg == '--path':
             paths.append(next(args))
         
+        elif arg == '--perf':
+            perf = int( next(args))
+
         elif arg == '--pip-install':
             pip_install = int(next(args))
 
@@ -687,6 +758,7 @@ if __name__ == '__main__':
     if sys.base_prefix == sys.prefix:
         # We are not inside a venv. Re-run ourselves inside a venv so that we
         # can use pypi.org packages such as pypdf2.
+        venv_name = 'pylocal'
         log(f'Re-running inside a venv.')
         command = 'true'
         # Install required system packages.
@@ -696,9 +768,9 @@ if __name__ == '__main__':
             command += f' && sudo pkg_add poppler-utils'
         # Create venv.
         if venv_install:
-            command += f' && {sys.executable} -m venv pylocal'
+            command += f' && {sys.executable} -m venv {venv_name}'
         # Activate the venv.
-        command += f' && . pylocal/bin/activate'
+        command += f' && . {venv_name}/bin/activate'
         # Install Python packages from pypi.org.
         if venv_install:
             if pip_install:
@@ -707,7 +779,13 @@ if __name__ == '__main__':
                 if not pymupdf_location:
                     command += ' && python -m pip install --upgrade pymupdf'
         # Rerun ourselves inside the venv.
-        command += f' && python {" ".join(sys.argv)}'
+        command += f' &&'
+        if austin:
+            command += f' {austin} -C -o out-austin'
+        if perf:
+            command += f' perf record'
+        command += f' python'
+        command += f' {" ".join(sys.argv)}'
         log(f'Running: {command}')
         subprocess.run(command, check=True, shell=1)
         sys.exit()
@@ -773,6 +851,8 @@ if __name__ == '__main__':
                 try:
                     pymupdf_install(pymupdf_location, mupdf_location, install_dir, name)
                 except Exception as e:
+                    if build_check:
+                        raise
                     log(f'*** Ignoring exception from building {name=} {pymupdf_location=} {mupdf_location=}: {e}')
         
         if mupdfpy_mupdf_master:
@@ -800,4 +880,6 @@ if __name__ == '__main__':
                 tools=tools,
                 timeout=timeout,
                 internal_check=internal_check,
+                austin=austin,
+                cprofile=cprofile,
                 )

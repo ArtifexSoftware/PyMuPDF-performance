@@ -557,14 +557,12 @@ def do_render_pymupdf(path):
 def do_render_pypdfium2(path):
     import pypdfium2
     doc = pypdfium2.PdfDocument(path)
-    for i in range(len(doc)):
-        page = doc[i]
+    for page in doc:
         bitmap = page.render(scale=150 / 72)
         img = bitmap.to_pil()
         out = f'{path}.render.pypdfium2-image-{i}.png'
         img.save(out)
         log(f'Have written to: {out}')
-    doc.close()
 
 
 # do_text_*()
@@ -599,7 +597,6 @@ def do_text_pypdfium2(path):
     doc = pypdfium2.PdfDocument(path)
     for page in doc:
         page.get_textpage().get_text_range()
-    doc.close()
 
 
 # Other

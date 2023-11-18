@@ -485,7 +485,7 @@ def get_version_poppler():
 
 def get_version_pypdfium2():
     import pypdfium2
-    return f"{pypdfium2.V_PYPDFIUM2}/{pypdfium2.V_LIBPDFIUM}"
+    return f"{pypdfium2.PYPDFIUM_INFO} / {pypdfium2.PDFIUM_INFO}"
 
 
 # Performance test functions.

@@ -119,6 +119,7 @@ import os
 import pickle
 import platform
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -225,7 +226,7 @@ def performance(
         if not toolversion_fn:
             raise Exception(f'Need function {name}() to find version of {toolname=}.')
         
-        t, e, version, ee = multiprocessing_run(toolversion_fn, 30, cprofile=cprofile)
+        t, e, version, ee = multiprocessing_run(toolversion_fn, timeout=30, cprofile=cprofile)
         results['toolversions'][toolname] = ee if ee else version
 
     log(f'testnames:\n{json.dumps(list(testnames), indent="    ", sort_keys=1)}')
@@ -275,9 +276,10 @@ def performance(
                 e = 0
                 ee = 0
         log(f'### {i}/{num_tests}: {testname=} {path=} {toolname=} {fn.__name__=}: {t=} {ee=}')
+        root = os.path.abspath(f'{__file__}/..')
         result = dict(
                 testname=testname,
-                path=path,
+                path=os.path.relpath(path, root),
                 toolname=toolname,
                 t=t,
                 e=ee,
@@ -407,14 +409,14 @@ def multiprocessing_run(fn, timeout, cprofile=False):
 
 def _import_pymupdf(install_dir):
     '''
-    Imports `fitz` from directory `install` by temporarily modifying
+    Imports `pymupdf` from directory `install` by temporarily modifying
     `sys.path`.
     '''
     assert isinstance(install_dir, str)
     sys.path.insert(0, install_dir)
     try:
-        import fitz
-        assert fitz.__file__.startswith(install_dir), f'Failed to import fitz from {install_dir}: {fitz.__file__=}'
+        import pymupdf
+        assert pymupdf.__file__.startswith(install_dir), f'Failed to import pymupdf from {install_dir}: {pymupdf.__file__=}'
     finally:
         del sys.path[0]
 
@@ -427,23 +429,28 @@ def _import_pymupdf(install_dir):
 #
 
 def get_version_pymupdf():
-    # Returns a dict with verion information, including detailed git
+    # Returns a dict with version information, including detailed git
     # information about PyMuPDF and MuPDF.
     #
-    import fitz
-    pymupdf_version = fitz.version
+    import pymupdf
+    #log(f'get_version_pymupdf(): {pymupdf.__file__=}')
+    #log(f'get_version_pymupdf(): {pymupdf.version=}')
+    #log(f'get_version_pymupdf(): {pymupdf.mupdf.Py_LIMITED_API=}')
+    pymupdf_version = pymupdf.version
 
-    pymupdf_git_sha     = getattr(fitz, 'pymupdf_git_sha', None)
-    pymupdf_git_comment = getattr(fitz, 'pymupdf_git_comment', None)
-    pymupdf_git_diff    = getattr(fitz, 'pymupdf_git_diff', None)
-    pymupdf_git_branch  = getattr(fitz, 'pymupdf_git_branch', None)
+    pymupdf_git_sha     = getattr(pymupdf, 'pymupdf_git_sha', None)
+    pymupdf_git_comment = getattr(pymupdf, 'pymupdf_git_comment', None)
+    pymupdf_git_diff    = getattr(pymupdf, 'pymupdf_git_diff', None)
+    pymupdf_git_branch  = getattr(pymupdf, 'pymupdf_git_branch', None)
 
-    mupdf_git_sha       = getattr(fitz, 'mupdf_git_sha', None)
-    mupdf_git_comment   = getattr(fitz, 'mupdf_git_comment', None)
-    mupdf_git_diff      = getattr(fitz, 'mupdf_git_diff', None)
-    mupdf_git_branch    = getattr(fitz, 'mupdf_git_branch', None)
+    mupdf_git_sha       = getattr(pymupdf, 'mupdf_git_sha', None)
+    mupdf_git_comment   = getattr(pymupdf, 'mupdf_git_comment', None)
+    mupdf_git_diff      = getattr(pymupdf, 'mupdf_git_diff', None)
+    mupdf_git_branch    = getattr(pymupdf, 'mupdf_git_branch', None)
     
-    mupdf_version = fitz.mupdf_version_tuple
+    Py_LIMITED_API      = getattr(pymupdf.mupdf, 'Py_LIMITED_API', None)
+    
+    mupdf_version = pymupdf.mupdf_version_tuple
     return dict(
             pymupdf=pymupdf_version,
 
@@ -457,6 +464,7 @@ def get_version_pymupdf():
             #mupdf_git_diff=mupdf_git_diff,
             mupdf_git_branch=mupdf_git_branch,
             
+            Py_LIMITED_API=Py_LIMITED_API,
             )
 
 def get_version_pdfrw():
@@ -511,8 +519,8 @@ def do_copy_pikepdf(path):
     doc.save(f'{path}.copy.pike')
 
 def do_copy_pymupdf(path):
-    import fitz
-    doc = fitz.open(path)
+    import pymupdf
+    doc = pymupdf.open(path)
     doc.save(f'{path}.copy.pymupdf')
 
 def do_copy_pypdf2(path):
@@ -544,8 +552,8 @@ def do_render_poppler(path):
     subprocess.run(command, shell=1, check=1)
 
 def do_render_pymupdf(path):
-    import fitz
-    doc = fitz.open(path)
+    import pymupdf
+    doc = pymupdf.open(path)
     for page in doc:
         pix = page.get_pixmap(dpi=150)
         out = f'{path}.render.pymupdf-image-{page.number}.png'
@@ -578,8 +586,8 @@ def do_text_poppler(path):
     subprocess.run(f'pdftotext {path} {path}.text.poppler', shell=1, check=1)
 
 def do_text_pymupdf(path):
-    import fitz
-    doc = fitz.open(path)
+    import pymupdf
+    doc = pymupdf.open(path)
     length = 0
     for page in doc:
         text = page.get_text()
@@ -606,11 +614,11 @@ def do_text_pypdfium2(path):
 #
 
 def log(text):
-    print(text)
+    print(f'{os.getpid()=}: {text}')
     sys.stdout.flush()
 
 
-def pymupdf_install(pymupdf_location, mupdf_location, root, local_git_dir):
+def pymupdf_install(pymupdf_location, mupdf_location, root, local_git_dir, Py_LIMITED_API=None):
     '''
     Builds and installs PyMuPDF using pip.
 
@@ -622,9 +630,11 @@ def pymupdf_install(pymupdf_location, mupdf_location, root, local_git_dir):
         None, Path of MuPDF directory, or gitlocation of MuPDF, e.g.:
         git:--branch master https://github.com/ArtifexSoftware/mupdf.git
     root:
-        Directory into which we install fitz.
+        Directory into which we install pymupdf.
     local_git_dir:
         Local git directory if `pymupdf_location` starts with 'git:'.
+    Py_LIMITED_API:
+        If set we build for specified version of limited API.
     '''
     if not pymupdf_location:
         return
@@ -654,9 +664,14 @@ def pymupdf_install(pymupdf_location, mupdf_location, root, local_git_dir):
     if mupdf_location:
         env = 'PYMUPDF_SETUP_MUPDF_TGZ= '
         if mupdf_location.startswith('git:'):
-            env += f'PYMUPDF_SETUP_MUPDF_BUILD="{mupdf_location}"'
+            env += f'PYMUPDF_SETUP_MUPDF_BUILD="{mupdf_location}" '
         else:
-            env += f'PYMUPDF_SETUP_MUPDF_BUILD="{os.path.relpath(mupdf_location, pymupdf_location)}"'
+            env += f'PYMUPDF_SETUP_MUPDF_BUILD="{os.path.relpath(mupdf_location, pymupdf_location)}" '
+    if Py_LIMITED_API:
+        if Py_LIMITED_API == 'default':
+            major, minor, patch = platform.python_version_tuple()
+            Py_LIMITED_API = f'0x{int(major):02x}{int(minor):02x}0000'
+        env += f'PYMUPDF_SETUP_Py_LIMITED_API={Py_LIMITED_API} '
     if platform.system() == 'OpenBSD':
         # Need to use system clang-python and swig because they are not
         # available in pypi.org and building from sdist fails.
@@ -666,19 +681,18 @@ def pymupdf_install(pymupdf_location, mupdf_location, root, local_git_dir):
     else:
         command = f'cd {pymupdf_location} && {env} pip install -v .'
         if root:
-            # This creates `<root>/fitz/{fitz.py,...}`.
+            # This creates `<root>/pymupdf/{pymupdf.py,...}`.
             command = f'{command} --upgrade --target {os.path.relpath(root, pymupdf_location)}'
     log( f'Running: {command}')
     subprocess.run( command, shell=1, check=1)
 
 
 if __name__ == '__main__':
-
     venv_install = True
     internal_check = False
     do = None
     mupdf_master_location = 'git:--branch master https://github.com/ArtifexSoftware/mupdf.git'
-    mupdf_branch_location = 'git:--branch 1.22.x https://github.com/ArtifexSoftware/mupdf.git'
+    mupdf_branch_location = 'git:--branch 1.24.x https://github.com/ArtifexSoftware/mupdf.git'
     pymupdf_location = 'git:--branch main https://github.com/pymupdf/PyMuPDF.git'
     mupdfpy_location = 'git:https://github.com/ArtifexSoftware/mupdfpy-julian.git'
     pymupdf_build = True
@@ -689,7 +703,7 @@ if __name__ == '__main__':
     tools = []
     austin = False
     cprofile = False
-    build_check = False
+    build_check = True
     perf = False
 
     args = iter(sys.argv[1:])
@@ -784,8 +798,7 @@ if __name__ == '__main__':
             command += f' {austin} -C -o out-austin'
         if perf:
             command += f' perf record'
-        command += f' python'
-        command += f' {" ".join(sys.argv)}'
+        command += f' python {shlex.join(sys.argv)}'
         log(f'Running: {command}')
         subprocess.run(command, check=True, shell=1)
         sys.exit()
@@ -804,14 +817,27 @@ if __name__ == '__main__':
             mupdfpy_mupdf_master = 'mupdfpy_mupdf_master' in tools
             pymupdf_mupdf_master = 'pymupdf_mupdf_master' in tools
             pymupdf_mupdf_branch = 'pymupdf_mupdf_branch' in tools
+            pymupdf_mupdf_master_pla = 'pymupdf_mupdf_master_pla' in tools
         else:
             mupdfpy_mupdf_master = True
             pymupdf_mupdf_master = True
             pymupdf_mupdf_branch = True
+            pymupdf_mupdf_master_pla = True
+        
+        def _make_pymupdf_variant_norgs(fnname, fn, install_dir):
+            '''
+            Make global function `{fnname}()` that imports pymupdf from
+            `install_dir` and calls `fn()`.
+            '''
+            def fn2(install_dir=install_dir):
+                _import_pymupdf(install_dir)
+                return fn()
+            assert getattr(globals(), fnname, None) is None
+            globals()[fnname] = fn2
         
         def _make_pymupdf_variant(fnname, fn, install_dir):
             '''
-            Make global function `{fnname}(path)` that imports fitz from
+            Make global function `{fnname}(path)` that imports pymupdf from
             `install_dir` and calls `fn(path)`.
             '''
             def fn2(path, install_dir=install_dir):
@@ -820,36 +846,20 @@ if __name__ == '__main__':
             assert getattr(globals(), fnname, None) is None
             globals()[fnname] = fn2
         
-        def _make_pymupdf_variants(install_dir, name):
-            '''
-            Makes global functions that import fitz from `install_dir` and call
-            get_version_pymupdf(), do_copy_pymupdf(), do_render_pymupdf() and
-            do_text_pymupdf(). Generated fns are called:
-            
-                get_version_{name}()
-                do_copy_{name}(path)
-                do_render_{name}(path)
-                do_text_{name}(path)
-            '''
-            def get_version(install_dir=install_dir):
-                log(f'_make_pymupdf_variants(): {install_dir=} {name=}')
-                _import_pymupdf(install_dir)
-                return get_version_pymupdf()
-            globals()[f'get_version_{name}'] = get_version
-            _make_pymupdf_variant(f'do_copy_{name}', do_copy_pymupdf, install_dir)
-            _make_pymupdf_variant(f'do_render_{name}', do_render_pymupdf, install_dir)
-            _make_pymupdf_variant(f'do_text_{name}', do_text_pymupdf, install_dir)
-
-        def _make(name, pymupdf_location, mupdf_location):
+        def _make(name, pymupdf_location, mupdf_location, Py_LIMITED_API=None):
             '''
             Sets things up for PyMuPDF implementation called `name`, built from
             `pymupdf_location` and `mupdf_location`.
             '''
             install_dir = os.path.abspath(f'{__file__}/../install_{name}')
-            _make_pymupdf_variants(install_dir, name)
+            log(f'Building PyMuPDF, {name=} {pymupdf_location=} {mupdf_location=} {Py_LIMITED_API=} {install_dir=}.')
+            _make_pymupdf_variant_norgs(f'get_version_{name}', get_version_pymupdf, install_dir)
+            _make_pymupdf_variant(f'do_copy_{name}', do_copy_pymupdf, install_dir)
+            _make_pymupdf_variant(f'do_render_{name}', do_render_pymupdf, install_dir)
+            _make_pymupdf_variant(f'do_text_{name}', do_text_pymupdf, install_dir)
             if pymupdf_build:
                 try:
-                    pymupdf_install(pymupdf_location, mupdf_location, install_dir, name)
+                    pymupdf_install(pymupdf_location, mupdf_location, install_dir, name, Py_LIMITED_API)
                 except Exception as e:
                     if build_check:
                         raise
@@ -872,6 +882,14 @@ if __name__ == '__main__':
                     'pymupdf_mupdf_branch',
                     pymupdf_location,
                     mupdf_branch_location,
+                    )
+        
+        if pymupdf_mupdf_master_pla:
+            _make(
+                    'pymupdf_mupdf_master_pla',
+                    pymupdf_location,
+                    mupdf_master_location,
+                    Py_LIMITED_API='default',
                     )
         
         performance(

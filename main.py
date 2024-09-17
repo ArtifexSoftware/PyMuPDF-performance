@@ -694,7 +694,7 @@ if __name__ == '__main__':
     mupdf_master_location = 'git:--branch master https://github.com/ArtifexSoftware/mupdf.git'
     mupdf_branch_location = 'git:--branch 1.24.x https://github.com/ArtifexSoftware/mupdf.git'
     pymupdf_location = 'git:--branch main https://github.com/pymupdf/PyMuPDF.git'
-    mupdfpy_location = 'git:https://github.com/ArtifexSoftware/mupdfpy-julian.git'
+    #mupdfpy_location = 'git:https://github.com/ArtifexSoftware/mupdfpy-julian.git'
     pymupdf_build = True
     pip_install = True
     timeout = None
@@ -747,8 +747,8 @@ if __name__ == '__main__':
         elif arg == '--pymupdf':
             pymupdf_location = next(args)
 
-        elif arg == '--mupdfpy':
-            mupdfpy_location = next(args)
+        #elif arg == '--mupdfpy':
+        #    mupdfpy_location = next(args)
 
         elif arg == '--pymupdf-build':
             pymupdf_build = int(next(args))
@@ -806,8 +806,8 @@ if __name__ == '__main__':
     else:
         if pymupdf_location == '0':
             pymupdf_location = None
-        if mupdfpy_location == '0':
-            mupdfpy_location = None
+        #if mupdfpy_location == '0':
+        #    mupdfpy_location = None
         if mupdf_master_location == '0':
             mupdf_master_location = None
         if mupdf_branch_location == '0':
@@ -865,12 +865,12 @@ if __name__ == '__main__':
                         raise
                     log(f'*** Ignoring exception from building {name=} {pymupdf_location=} {mupdf_location=}: {e}')
         
-        if mupdfpy_mupdf_master:
-            _make(
-                    'mupdfpy_mupdf_master',
-                    mupdfpy_location,
-                    mupdf_master_location,
-                    )
+        #if mupdfpy_mupdf_master:
+        #    _make(
+        #            'mupdfpy_mupdf_master',
+        #            mupdfpy_location,
+        #            mupdf_master_location,
+        #            )
         if pymupdf_mupdf_master:
             _make(
                     'pymupdf_mupdf_master',
